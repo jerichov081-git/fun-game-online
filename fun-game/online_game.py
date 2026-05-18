@@ -53,6 +53,9 @@ CROWN_COL, PLAT_COL, PLAT_TOP = (255, 215, 0), (52, 47, 82), (88, 78, 128)
 WALL_COL, WALL_EDGE, GND_COL, GND_LINE = (68, 58, 100), (108, 93, 148), (38, 34, 62), (78, 68, 112)
 TEXT_COL, DIM_COL = (225, 220, 255), (80, 74, 120)
 
+# Global font cache to prevent extreme frame-rate drops
+BHOP_FONT = None
+
 ABILITIES = [
     {"id": "rocket",     "name": "Rocket",  "color": (255, 140,  40), "icon": "R", "desc": "Launch yourself in your facing direction", "cd": 180},
     {"id": "blink",      "name": "Blink",   "color": (160,  80, 255), "icon": "B", "desc": "Teleport dash a short distance",           "cd": 150},
@@ -80,7 +83,6 @@ class NetworkClient:
     def connect(self):
         try:
             self.socket.connect((self.server_ip, self.port))
-            # Blocking read for structural maps init data on handshake
             init_data = json.loads(self.socket.recv(1024 * 16).decode().split('\n')[0])
             self.my_id = init_data["player_id"]
             self.level_layout = init_data["level"]
@@ -136,7 +138,6 @@ class Particle:
         pygame.draw.circle(s, (*self.col, a), (r, r), r)
         surface.blit(s, (int(self.x) - r, int(self.y) - r))
 
-# ─── Bomb / Grapple Entity Sync Stubs ─────────────────────────────────────────
 class ClientBomb:
     def __init__(self, x, y, fuse):
         self.x, self.y, self.fuse, self.r = x, y, fuse, 8
@@ -167,7 +168,7 @@ class Player:
         self.ability_id, self.ability_cd, self.shield_up, self.facing = "none", 0, 0, 1
         self.squish, self.stretch = 0, 0
         self.trail, self.particles, self.sparks = [], [], []
-        self.bombs = []  # For local player tracking
+        self.bombs = []
         self.grapple_obj = None
         self.outbound_events = []
 
@@ -224,7 +225,6 @@ class Player:
         if self.on_wall != 0 and not self.on_ground and self.vy > WALL_SLIDE_VEL and not self.slamming:
             self.vy = WALL_SLIDE_VEL
 
-        # Grapple physics simulation logic
         if self.grapple_obj and self.grapple_obj.get("attached"):
             dx = self.grapple_obj["ax"] - self.center[0]
             dy = self.grapple_obj["ay"] - self.center[1]
@@ -274,7 +274,6 @@ class Player:
                     if self.slamming and not self.slam_hit:
                         self.slam_hit = True
                         self.slamming = False
-                        # Broadcast slam shockwave event
                         radius = SLAM_SHOCKWAVE_R * (2 if self.ability_id == "slam_boost" else 1)
                         self.outbound_events.append({"type": "shockwave", "cx": self.center[0], "cy": self.y + self.h, "r": radius})
                         self.slam_cd = 45
@@ -293,7 +292,6 @@ class Player:
         else:
             self.bhop_mult = max(1.0, self.bhop_mult * 0.998)
 
-        # Sync local grappling hook update loop
         if self.grapple_obj:
             g = self.grapple_obj
             if not g["attached"]:
@@ -306,7 +304,6 @@ class Player:
                         if gr.colliderect(s): g["attached"] = True; g["ax"] = g["x"]; g["ay"] = g["y"]; break
                     if g["x"] < 0 or g["x"] > WIDTH or g["y"] < 0 or g["y"] > HEIGHT: self.grapple_obj = None
 
-        # Local bomb simulations loops
         rem_bombs = []
         for b in self.bombs:
             b["fuse"] -= 1
@@ -324,7 +321,6 @@ class Player:
             rem_bombs.append(b)
         self.bombs = rem_bombs
 
-        # Self decrement local counters
         for attr in ("speed_boost", "frozen", "ghost", "jump_boost", "ability_cd", "slam_cd", "shield_up", "squish", "stretch", "land_timer", "wall_jump_lock"):
             v = getattr(self, attr)
             if v > 0: setattr(self, attr, v - 1)
@@ -344,7 +340,6 @@ class Player:
         self.slamming = True; self.vy = SLAM_VEL; self.vx *= 0.3; self.slam_hit = False
 
     def build_network_dict(self):
-        """Serialize relevant positional properties to send to server."""
         return {
             "name": self.name, "x": self.x, "y": self.y, "vx": self.vx, "vy": self.vy,
             "facing": self.facing, "squish": self.squish, "stretch": self.stretch,
@@ -359,7 +354,6 @@ def draw_network_player(surface, p_id, data, is_tagger, tick):
     x, y, w, h = data["x"], data["y"], PLAYER_W, PLAYER_H
     col = PLAYER_DEFS[int(p_id)][1]
     
-    # Render passive states
     if data["shield_up"] > 0: col = lerp_color(col, (100, 180, 255), 0.6)
     if data["ghost"] > 0: col = lerp_color(col, (190, 80, 255), 0.5)
     if data["frozen"] > 0: col = lerp_color(col, (120, 210, 255), 0.7)
@@ -381,7 +375,6 @@ def draw_network_player(surface, p_id, data, is_tagger, tick):
 
     pygame.draw.rect(surface, col, pygame.Rect(dx, dy, dw, dh), border_radius=8)
 
-    # Eyes
     ey = dy + dh // 3
     facing = data["facing"]
     e1x, e2x = (dx + dw * 2 // 5, dx + dw * 4 // 5 - 4) if facing > 0 else (dx + dw // 5, dx + dw * 3 // 5 - 4)
@@ -393,23 +386,22 @@ def draw_network_player(surface, p_id, data, is_tagger, tick):
         cx, cyt = dx + dw // 2, dy - 4
         pygame.draw.polygon(surface, CROWN_COL, [(cx-10,cyt),(cx-5,cyt-9),(cx,cyt-4),(cx+5,cyt-9),(cx+10,cyt)])
 
-    # Draw sync entities for remote entities
     for b in data.get("bombs", []):
         ClientBomb(b["x"], b["y"], b["fuse"]).draw(surface, tick)
     if data.get("grapple"):
         g = data["grapple"]
         ClientGrapple(g["x"], g["y"], g["attached"], g["ax"], g["ay"]).draw(surface, x+w/2, y+h/2)
 
-    if data.get("bhop_mult", 1.0) > 1.08:
-        sf = pygame.font.SysFont("Consolas", 11, bold=True)
-        st = sf.render(f"x{data['bhop_mult']:.1f}", True, (255, 220, 60))
+    # Uses the performance optimized global font cache
+    if data.get("bhop_mult", 1.0) > 1.08 and BHOP_FONT:
+        st = BHOP_FONT.render(f"x{data['bhop_mult']:.1f}", True, (255, 220, 60))
         surface.blit(st, (dx, dy - 22))
 
 # ─── Network Main Integration ──────────────────────────────────────────────────
 def main():
     pygame.init()
+    global BHOP_FONT
     
-    # Prompt user for server details before initialization
     server_ip = input("Enter Server IP (Press Enter for Localhost): ").strip()
     if not server_ip: server_ip = "127.0.0.1"
 
@@ -425,14 +417,16 @@ def main():
     bigfont = pygame.font.SysFont("Consolas", 34, bold=True)
     font = pygame.font.SysFont("Consolas", 24, bold=True)
     sm = pygame.font.SysFont("Consolas", 14)
+    BHOP_FONT = pygame.font.SysFont("Consolas", 11, bold=True) # Initialized ONCE here
 
     bg_surf = make_bg(WIDTH, HEIGHT)
     stars = [(random.randint(0, WIDTH), random.randint(0, HEIGHT * 2 // 3), random.randint(55, 185)) for _ in range(100)]
     
-    # Setup static solid objects from global layout config
+    # Track the active layout dynamically
+    loaded_level = net.level_layout
     solids = [GROUND_RECT]
-    platforms = [pygame.Rect(*p) for p in net.level_layout["platforms"]]
-    walls = [pygame.Rect(*w) for w in net.level_layout["walls"]]
+    platforms = [pygame.Rect(*p) for p in loaded_level["platforms"]]
+    walls = [pygame.Rect(*w) for w in loaded_level["walls"]]
     solids.extend(platforms + walls)
 
     p_def = PLAYER_DEFS[net.my_id]
@@ -441,16 +435,31 @@ def main():
     tick = 0
     round_start_ticks = pygame.time.get_ticks()
     picker = None
+    last_game_state = None
 
     while True:
         tick += 1
         keys = pygame.key.get_pressed()
         s_state = net.latest_server_state
 
-        # Use fallback placeholders until network responses arrive
         current_game_state = s_state["game_state"] if s_state else "home"
         tagger_id = str(s_state["tagger_idx"]) if s_state else "0"
         scores = s_state["scores"] if s_state else [0,0,0,0]
+
+        # FIX 1: Dynamically update map blocks and bounding rects when server switches levels
+        if s_state and s_state.get("level") != loaded_level:
+            loaded_level = s_state["level"]
+            platforms = [pygame.Rect(*p) for p in loaded_level["platforms"]]
+            walls = [pygame.Rect(*w) for w in loaded_level["walls"]]
+            solids = [GROUND_RECT] + platforms + walls
+
+        # FIX 4: Intercept State transitions to keep round clocks and pick menus reset for all clients
+        if current_game_state != last_game_state:
+            if current_game_state in ("pick", "playing"):
+                round_start_ticks = pygame.time.get_ticks()
+            if current_game_state == "pick":
+                picker = None
+            last_game_state = current_game_state
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -476,9 +485,7 @@ def main():
                 
                 if current_game_state == "result" and event.key == pygame.K_SPACE:
                     net.send({"command": "next_round"})
-                    round_start_ticks = pygame.time.get_ticks()
 
-        # Process Network Events (Shockwaves / Explosions triggered by remote players)
         if s_state and s_state.get("events"):
             for e in s_state["events"]:
                 cx, cy = e.get("cx", 0), e.get("cy", 0)
@@ -502,7 +509,6 @@ def main():
         if current_game_state == "playing":
             local_player.update(keys, solids)
             
-            # Host/Client collisions validation (Am I the tagger touching a runner?)
             if tagger_id == str(net.my_id):
                 for p_id, p_data in s_state.get("players", {}).items():
                     if p_id == str(net.my_id): continue
@@ -511,17 +517,16 @@ def main():
                         scores[net.my_id] += 1
                         net.send({"command": "round_over", "scores": scores})
 
-            # Sync local power-up collisions
+            # FIX 3: Detect local power-up overlaps and tell the server to deactivate it globally
             if s_state and s_state.get("level"):
-                for pu in s_state["level"]["powerups"]:
+                for idx, pu in enumerate(s_state["level"]["powerups"]):
                     if pu["alive"] and local_player.rect.colliderect(pygame.Rect(pu["x"], pu["y"], 20, 20)):
-                        # Apply locally
                         if pu["kind"] == "jump": local_player.jump_boost = 300
                         elif pu["kind"] == "speed": local_player.speed_boost = 360
                         elif pu["kind"] == "ghost": local_player.ghost = 300
-                        pu["alive"] = False # Visual hide
+                        elif pu["kind"] == "freeze": local_player.frozen = 120
+                        net.send({"command": "claim_powerup", "powerup_idx": idx})
 
-            # Ship frame changes packet to Server
             net.send({
                 "player_state": local_player.build_network_dict(),
                 "events": local_player.outbound_events
@@ -566,7 +571,6 @@ def main():
                 pygame.draw.rect(screen, PLAT_COL, p, border_radius=5)
                 pygame.draw.rect(screen, PLAT_TOP, pygame.Rect(p.x, p.y, p.width, 4), border_radius=3)
 
-            # Draw static level powerups synchronized from server structural maps
             if s_state and s_state.get("level"):
                 for pu in s_state["level"]["powerups"]:
                     if not pu["alive"]: continue
@@ -574,7 +578,6 @@ def main():
                     pygame.draw.rect(screen, PU_COLORS[pu["kind"]], r, border_radius=5)
                     screen.blit(sm.render(PU_LABELS[pu["kind"]], True, (10,10,10)), (pu["x"]+1, pu["y"]+5))
 
-            # Iterate map configurations dictionary from broadcast snapshots
             if s_state and "players" in s_state:
                 for p_id, p_data in s_state["players"].items():
                     if p_id == str(net.my_id):
@@ -585,6 +588,10 @@ def main():
             # HUD Display Rendering
             time_left = max(0, ROUND_TIME - (pygame.time.get_ticks() - round_start_ticks) // 1000)
             screen.blit(font.render(f"TIME: {time_left}s", True, TEXT_COL), (WIDTH//2 - 50, 15))
+            
+            # FIX: Trigger round end if the timer runs dry (Host slot verifies and pushes it)
+            if current_game_state == "playing" and time_left == 0 and net.my_id == 0:
+                net.send({"command": "round_over", "scores": scores})
             
             for idx, score in enumerate(scores):
                 p_name = PLAYER_DEFS[idx][0]
