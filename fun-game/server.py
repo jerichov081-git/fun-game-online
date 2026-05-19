@@ -70,8 +70,10 @@ def generate_level_data():
 class TagServer:
     def __init__(self, host="0.0.0.0", port=5555):
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server.bind((host, port))
         self.server.listen(4)
+        self.server.settimeout(1.0)
         self.clients = {}
         self.global_state = {
             "game_state": "home",  # home, pick, playing, result
@@ -172,19 +174,31 @@ class TagServer:
 
     def run(self):
         player_counter = 0
-        while True:
-            client_socket, addr = self.server.accept()
-            if len(self.clients) >= 4:
-                client_socket.close()
-                continue
-            
-            # Find an available player slot index
-            assigned_id = player_counter % 4
-            player_counter += 1
-            
-            self.clients[assigned_id] = client_socket
-            print(f"[CONNECTION] Player {assigned_id} joined from {addr}")
-            threading.Thread(target=self.handle_client, args=(client_socket, assigned_id), daemon=True).start()
+        try:
+            while True:
+                try:
+                    client_socket, addr = self.server.accept()
+                except socket.timeout:
+                    continue
+                except OSError as exc:
+                    print(f"[SERVER ERROR] accept() failed: {exc}")
+                    break
+
+                if len(self.clients) >= 4:
+                    client_socket.close()
+                    continue
+                
+                # Find an available player slot index
+                assigned_id = player_counter % 4
+                player_counter += 1
+                
+                self.clients[assigned_id] = client_socket
+                print(f"[CONNECTION] Player {assigned_id} joined from {addr}")
+                threading.Thread(target=self.handle_client, args=(client_socket, assigned_id), daemon=True).start()
+        except KeyboardInterrupt:
+            print("[SHUTDOWN] Server stopping.")
+        finally:
+            self.server.close()
 
 if __name__ == "__main__":
     server = TagServer()
