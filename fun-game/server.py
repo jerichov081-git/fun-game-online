@@ -4,6 +4,7 @@ import json
 import random
 import os
 
+# Prevent Pygame from opening a window on the server machine
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 import pygame
 
@@ -45,6 +46,7 @@ def generate_level_data():
             ay = random.choice([GROUND_Y - 70, GROUND_Y - 165, GROUND_Y - 270, GROUND_Y - 375])
             wy = ay - wh
             
+            # Simulated collision checking
             wr = pygame.Rect(wx, wy, WALL_W, wh)
             p_rects = [pygame.Rect(*p) for p in platforms]
             w_rects = [pygame.Rect(*w) for w in walls]
@@ -53,6 +55,7 @@ def generate_level_data():
                 walls.append([wx, wy, WALL_W, wh])
                 break
                 
+    # Sync floor power-ups
     powerups = []
     kinds = ["jump", "speed", "freeze", "ghost"]
     chosen_plats = random.sample(platforms, min(len(platforms), 4))
@@ -71,16 +74,37 @@ class TagServer:
         self.server.listen(4)
         self.clients = {}
         self.global_state = {
-            "game_state": "home",
+            "game_state": "home",  # home, pick, playing, result
             "players": {},
             "level": generate_level_data(),
             "tagger_idx": 0,
             "scores": [0, 0, 0, 0],
             "events": []
         }
+        
+        # Automatically find the host machine's actual local IP address
+        hosting_ip = self.get_local_ip()
+        
+        print("=" * 60)
         print(f"[SERVER STARTED] Listening on port {port}...")
+        print(f"[JOIN INFO] Players on your local network can join using IP: {hosting_ip}")
+        print("=" * 60)
+
+    def get_local_ip(self):
+        """Attempts to discover the active local network IP of this machine."""
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # Simulated UDP connection to determine the correct active network interface
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+        except Exception:
+            ip = "127.0.0.1"
+        finally:
+            s.close()
+        return ip
 
     def broadcast(self, data):
+        """Send data to all connected clients."""
         msg = json.dumps(data) + "\n"
         encoded = msg.encode()
         for client_socket in list(self.clients.values()):
@@ -90,6 +114,7 @@ class TagServer:
                 pass
 
     def handle_client(self, client_socket, player_id):
+        # Initial connection message payload
         init_payload = {"player_id": player_id, "level": self.global_state["level"]}
         try:
             client_socket.sendall((json.dumps(init_payload) + "\n").encode())
@@ -107,6 +132,7 @@ class TagServer:
                     if not line.strip(): continue
                     packet = json.loads(line)
                     
+                    # Merge inbound client actions/positions into global tracking state
                     if "player_state" in packet:
                         self.global_state["players"][str(player_id)] = packet["player_state"]
                     
@@ -116,6 +142,7 @@ class TagServer:
                             self.global_state["game_state"] = "pick"
                         elif cmd == "abilities_chosen":
                             self.global_state["game_state"] = "playing"
+                            # Pick random tagger from connected players
                             active_ids = list(self.clients.keys())
                             if active_ids:
                                 self.global_state["tagger_idx"] = random.choice(active_ids)
@@ -125,17 +152,14 @@ class TagServer:
                         elif cmd == "next_round":
                             self.global_state["level"] = generate_level_data()
                             self.global_state["game_state"] = "pick"
-                        # FIX 3 (Cont.): Permanently turn off the item status inside the true server data
-                        elif cmd == "claim_powerup":
-                            pu_idx = packet.get("powerup_idx")
-                            if pu_idx is not None and 0 <= pu_idx < len(self.global_state["level"]["powerups"]):
-                                self.global_state["level"]["powerups"][pu_idx]["alive"] = False
                         
                     if "events" in packet:
+                        # Forward gameplay physics occurrences (shockwaves, explosions) to all clients
                         self.global_state["events"].extend(packet["events"])
 
+                # Broadcast current status snapshot back out
                 self.broadcast(self.global_state)
-                self.global_state["events"] = []
+                self.global_state["events"] = []  # Clear processed events
             except:
                 break
 
@@ -154,6 +178,7 @@ class TagServer:
                 client_socket.close()
                 continue
             
+            # Find an available player slot index
             assigned_id = player_counter % 4
             player_counter += 1
             
