@@ -71,7 +71,7 @@ class TagServer:
     def __init__(self, host="0.0.0.0", port=5555):
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         
-        # Allow the socket to immediately reuse the address (helps bypass WinError 10048)
+        # Bypasses WinError 10048 if port was recently closed
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
         self.server.bind((host, port))
@@ -86,19 +86,17 @@ class TagServer:
             "events": []
         }
         
-        # Automatically discover the host machine's actual local IP address
         hosting_ip = self.get_local_ip()
         
         print("=" * 65)
         print(f"[SERVER STARTED] Listening on port {port}...")
-        print(f"[JOIN INFO] Players on your local network can join using IP: {hosting_ip}")
+        print(f"[JOIN INFO] Play on LAN using IP address: {hosting_ip}")
         print("=" * 65)
 
     def get_local_ip(self):
-        """Attempts to discover the active local network IP of this machine."""
+        """Discovers the active local network IP adapter interface."""
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            # Simulated UDP connection to determine the correct active network interface
             s.connect(("8.8.8.8", 80))
             ip = s.getsockname()[0]
         except Exception:
@@ -108,7 +106,7 @@ class TagServer:
         return ip
 
     def broadcast(self, data):
-        """Send data to all connected clients."""
+        """Send snapshot payloads out to all connected clients."""
         msg = json.dumps(data) + "\n"
         encoded = msg.encode()
         for client_socket in list(self.clients.values()):
@@ -118,14 +116,13 @@ class TagServer:
                 pass
 
     def handle_client(self, client_socket, player_id):
-        print(f"[CONNECTING] Handshaking with Player {player_id}...")
-        # Initial connection message payload
+        print(f"[CONNECTION] Handshaking securely with Player {player_id}...")
         init_payload = {"player_id": player_id, "level": self.global_state["level"]}
         try:
             client_socket.sendall((json.dumps(init_payload) + "\n").encode())
-            print(f"[HANDSHAKE SUCCESS] Sent level data to Player {player_id}")
+            print(f"[SUCCESS] Map layout sent to Player {player_id} configuration.")
         except Exception as e:
-            print(f"[HANDSHAKE FAILED] Could not send initial data to Player {player_id}: {e}")
+            print(f"[ERROR] Handshake failed for Player {player_id}: {e}")
             client_socket.close()
             return
 
@@ -133,9 +130,7 @@ class TagServer:
         while True:
             try:
                 data = client_socket.recv(4096).decode()
-                if not data: 
-                    print(f"[DISCONNECT] Player {player_id} closed connection cleanly.")
-                    break
+                if not data: break
                 buffer += data
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)
@@ -144,10 +139,8 @@ class TagServer:
                     try:
                         packet = json.loads(line)
                     except json.JSONDecodeError:
-                        print(f"[WARN] Player {player_id} sent invalid JSON format.")
                         continue
                     
-                    # Merge inbound client actions/positions into global tracking state
                     if "player_state" in packet:
                         self.global_state["players"][str(player_id)] = packet["player_state"]
                     
@@ -157,7 +150,6 @@ class TagServer:
                             self.global_state["game_state"] = "pick"
                         elif cmd == "abilities_chosen":
                             self.global_state["game_state"] = "playing"
-                            # Pick random tagger from connected players
                             active_ids = list(self.clients.keys())
                             if active_ids:
                                 self.global_state["tagger_idx"] = random.choice(active_ids)
@@ -169,12 +161,10 @@ class TagServer:
                             self.global_state["game_state"] = "pick"
                         
                     if "events" in packet:
-                        # Forward gameplay physics occurrences (shockwaves, explosions) to all clients
                         self.global_state["events"].extend(packet["events"])
 
-                # Broadcast current status snapshot back out
                 self.broadcast(self.global_state)
-                self.global_state["events"] = []  # Clear processed events
+                self.global_state["events"] = [] 
             except Exception as e:
                 print(f"[ERROR] Connection broken with Player {player_id}: {e}")
                 break
@@ -195,15 +185,14 @@ class TagServer:
                     client_socket.close()
                     continue
                 
-                # Find an available player slot index
                 assigned_id = player_counter % 4
                 player_counter += 1
                 
                 self.clients[assigned_id] = client_socket
-                print(f"[CONNECTION] Player {assigned_id} joined from {addr}")
+                print(f"[CONNECTED] Incoming player from network address {addr}")
                 threading.Thread(target=self.handle_client, args=(client_socket, assigned_id), daemon=True).start()
             except Exception as e:
-                print(f"[SERVER EXCEPTION] Error accepting connection: {e}")
+                print(f"[SERVER CRASH ALERT] Error accepting pipeline connection: {e}")
                 break
 
 if __name__ == "__main__":
