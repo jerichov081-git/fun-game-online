@@ -70,10 +70,12 @@ def generate_level_data():
 class TagServer:
     def __init__(self, host="0.0.0.0", port=5555):
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        
+        # Allow the socket to immediately reuse the address (helps bypass WinError 10048)
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
         self.server.bind((host, port))
         self.server.listen(4)
-        self.server.settimeout(1.0)
         self.clients = {}
         self.global_state = {
             "game_state": "home",  # home, pick, playing, result
@@ -84,13 +86,13 @@ class TagServer:
             "events": []
         }
         
-        # Automatically find the host machine's actual local IP address
+        # Automatically discover the host machine's actual local IP address
         hosting_ip = self.get_local_ip()
         
-        print("=" * 60)
+        print("=" * 65)
         print(f"[SERVER STARTED] Listening on port {port}...")
         print(f"[JOIN INFO] Players on your local network can join using IP: {hosting_ip}")
-        print("=" * 60)
+        print("=" * 65)
 
     def get_local_ip(self):
         """Attempts to discover the active local network IP of this machine."""
@@ -116,23 +118,34 @@ class TagServer:
                 pass
 
     def handle_client(self, client_socket, player_id):
+        print(f"[CONNECTING] Handshaking with Player {player_id}...")
         # Initial connection message payload
         init_payload = {"player_id": player_id, "level": self.global_state["level"]}
         try:
             client_socket.sendall((json.dumps(init_payload) + "\n").encode())
-        except:
+            print(f"[HANDSHAKE SUCCESS] Sent level data to Player {player_id}")
+        except Exception as e:
+            print(f"[HANDSHAKE FAILED] Could not send initial data to Player {player_id}: {e}")
+            client_socket.close()
             return
 
         buffer = ""
         while True:
             try:
                 data = client_socket.recv(4096).decode()
-                if not data: break
+                if not data: 
+                    print(f"[DISCONNECT] Player {player_id} closed connection cleanly.")
+                    break
                 buffer += data
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)
                     if not line.strip(): continue
-                    packet = json.loads(line)
+                    
+                    try:
+                        packet = json.loads(line)
+                    except json.JSONDecodeError:
+                        print(f"[WARN] Player {player_id} sent invalid JSON format.")
+                        continue
                     
                     # Merge inbound client actions/positions into global tracking state
                     if "player_state" in packet:
@@ -162,7 +175,8 @@ class TagServer:
                 # Broadcast current status snapshot back out
                 self.broadcast(self.global_state)
                 self.global_state["events"] = []  # Clear processed events
-            except:
+            except Exception as e:
+                print(f"[ERROR] Connection broken with Player {player_id}: {e}")
                 break
 
         print(f"[DISCONNECT] Player {player_id} left.")
@@ -174,16 +188,9 @@ class TagServer:
 
     def run(self):
         player_counter = 0
-        try:
-            while True:
-                try:
-                    client_socket, addr = self.server.accept()
-                except socket.timeout:
-                    continue
-                except OSError as exc:
-                    print(f"[SERVER ERROR] accept() failed: {exc}")
-                    break
-
+        while True:
+            try:
+                client_socket, addr = self.server.accept()
                 if len(self.clients) >= 4:
                     client_socket.close()
                     continue
@@ -195,10 +202,9 @@ class TagServer:
                 self.clients[assigned_id] = client_socket
                 print(f"[CONNECTION] Player {assigned_id} joined from {addr}")
                 threading.Thread(target=self.handle_client, args=(client_socket, assigned_id), daemon=True).start()
-        except KeyboardInterrupt:
-            print("[SHUTDOWN] Server stopping.")
-        finally:
-            self.server.close()
+            except Exception as e:
+                print(f"[SERVER EXCEPTION] Error accepting connection: {e}")
+                break
 
 if __name__ == "__main__":
     server = TagServer()
